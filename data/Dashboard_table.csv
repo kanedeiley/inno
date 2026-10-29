@@ -1,0 +1,9 @@
+Role,Account,Session,Workstation,Site,Accession,Procedure,Patient,Attending,Lock,Last Action
+Radiologist,"Patel, Anika",Active,RADWS-014,Main Campus,ACC10045821,CT HEAD WO CONTRAST,"DOE, JANE (MRN 4410298)","Patel, Anika",Locked,Dictating
+Radiologist,"Nguyen, David",Active,RADWS-022,Main Campus,ACC10045877,MRI LUMBAR SPINE WO,"SMITH, ROBERT (MRN 5520187)","Nguyen, David",Locked,Viewing
+Radiologist,"Okafor, Grace",Active,RADWS-031,Breast Center,ACC10045902,MAMMO SCREENING BILAT TOMO,"LEE, MARIA (MRN 3398021)","Okafor, Grace",Locked,Viewing
+Technologist,"Russo, Marco",Active,CTTECH-03,Main Campus,ACC10045915,CTA CHEST PE PROTOCOL,"BROWN, ALAN (MRN 6671034)","Patel, Anika",Unlocked,Acquiring
+Radiologist,"Kim, Steven",Idle,RADWS-040,Outpatient Imaging,,,,,Unlocked,Logged In
+Radiologist,"Haddad, Leila",Active,RADWS-047,Main Campus,ACC10045933,US ABDOMEN COMPLETE,"GARCIA, ROSA (MRN 2289154)","Haddad, Leila",Locked,Dictating
+Radiologist,"Brennan, Thomas",Active,RADWS-052,Main Campus,ACC10045950,NM BONE SCAN WHOLE BODY,"WHITE, KAREN (MRN 7714420)","Brennan, Thomas",Locked,Viewing
+Radiologist,"Patel, Raj",Active,RADWS-060,Outpatient Imaging,ACC10045968,XR CHEST 2 VIEWS,"MILLER, JOHN (MRN 1123987)","Patel, Raj",Locked,Dictating
