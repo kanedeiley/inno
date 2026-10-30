@@ -181,7 +181,7 @@ export async function nextTurn(session, utterance, mode) {
     }
   }
   // A system ID the caller states (or a correction) wins over the lookup.
-  if (x.system_id) session.draft.system_id = x.system_id.toUpperCase().replace(/\s+/g, '');
+  if (x.system_id) session.draft.system_id = x.system_id.trim().toUpperCase().replace(/\s+/g, '-');
 
   const d = session.draft;
   Object.assign(d, {

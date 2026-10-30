@@ -58,4 +58,4 @@ const server = http.createServer(app);
 attachRealtime(server);
 
 const port = Number(process.env.PORT || 3001);
-server.listen(port, () => console.log(`[server] http://localhost:${port}`));
+server.listen(port, () => console.log(`[server] http://localhost:${port} (server-driven flow, barge-in on)`));

@@ -110,6 +110,7 @@ function bridge(client, session) {
         turns = turns.then(async () => {
           sendClient({ type: 'proxy.thinking', on: true });
           const { say, events, done } = await nextTurn(session, utterance, 'voice');
+          console.log(`[turn] caller: "${utterance}" -> say: ${say ? `"${say}"` : '(silent)'}`);
           sendClient({ type: 'proxy.thinking', on: false });
           for (const e of events) sendClient({ type: `proxy.${e.type}`, ...e });
           if (done) closeAfterSpeaking = true;
@@ -117,6 +118,14 @@ function bridge(client, session) {
         });
         break;
       }
+      case 'input_audio_buffer.speech_started':
+        // Barge-in: stop the line being spoken; the caller's new utterance drives the next one.
+        if (responding) sendUp({ type: 'response.cancel' });
+        queuedLine = null;
+        break;
+      case 'session.updated':
+        console.log('[realtime] session configured (server-driven flow)');
+        break;
       case 'response.done':
         responding = false;
         if (queuedLine) {
