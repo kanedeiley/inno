@@ -49,9 +49,10 @@ export default function App() {
     });
   }, []);
 
-  const addEvent = (text) => setMessages((l) => [...l, { id: crypto.randomUUID(), role: 'event', text }]);
+  const addEvent = (text, tone) => setMessages((l) => [...l, { id: crypto.randomUUID(), role: 'event', text, tone }]);
 
   const onTicket = (t) => {
+    addEvent(`Logged ${t.number} · ${t.application} · ${t.priority}`, 'ok');
     ticketRef.current = t;
     setTicket(t);
     setDraft(t);
@@ -135,6 +136,12 @@ export default function App() {
         break;
       case 'proxy.ticket.submitted':
         onTicket(evt.ticket);
+        break;
+      case 'proxy.call.complete':
+        if (!call.hangingUp) {
+          call.hangingUp = true;
+          call.drained().then(() => setTimeout(() => call.stop(), 600));
+        }
         break;
       case 'response.done': {
         // Hang up on our own once the closing line (the response after submit_ticket) has been spoken.

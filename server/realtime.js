@@ -1,5 +1,5 @@
 import { WebSocket, WebSocketServer } from 'ws';
-import { buildInstructions, getSession, realtimeTools, runTool } from './agent.js';
+import { buildInstructions, claimsLogged, getSession, realtimeTools, runTool, TRANSCRIBE_PROMPT } from './agent.js';
 
 const API = (process.env.AZURE_OPENAI_REALTIME_API || 'ga').toLowerCase();
 
@@ -15,7 +15,7 @@ function upstreamUrl() {
 function sessionUpdate(session) {
   const instructions = buildInstructions(session, 'voice');
   const voice = process.env.REALTIME_VOICE || 'alloy';
-  const transcription = { model: process.env.REALTIME_TRANSCRIBE_MODEL || 'whisper-1' };
+  const transcription = { model: process.env.REALTIME_TRANSCRIBE_MODEL || 'whisper-1', language: 'en', prompt: TRANSCRIBE_PROMPT };
   // Short silence window keeps turns snappy; callers on a helpdesk line talk in short bursts.
   const turn_detection = { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 250, silence_duration_ms: 450 };
 
@@ -95,7 +95,29 @@ function bridge(client, session) {
       sendClient({ type: 'proxy.tool', name: evt.name, args: evt.arguments, output });
       for (const e of events) sendClient({ type: `proxy.${e.type}`, ...e });
       sendUp({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: evt.call_id, output: JSON.stringify(output) } });
-      sendUp({ type: 'response.create' });
+      if (session.forcedSubmit && session.ticket) {
+        // The caller already heard the closing line; just wrap up.
+        sendClient({ type: 'proxy.call.complete' });
+      } else {
+        sendUp({ type: 'response.create' });
+      }
+    }
+
+    // Guard: the model told the caller it's logged but never called submit_ticket -> force the call silently.
+    if (evt.type === 'response.done' && !session.ticket && !session.forcedSubmit) {
+      const output = evt.response?.output || [];
+      const said = output.flatMap((o) => o.content || []).map((c) => c.transcript || c.text || '').join(' ');
+      if (claimsLogged(said) && !output.some((o) => o.type === 'function_call')) {
+        session.forcedSubmit = true;
+        sendClient({ type: 'proxy.forced_submit' });
+        sendUp({
+          type: 'response.create',
+          response: {
+            tool_choice: { type: 'function', name: 'submit_ticket' },
+            instructions: 'Call submit_ticket now using what the caller said. Do not speak.',
+          },
+        });
+      }
     }
     if (evt.type === 'error') console.error('[realtime] upstream error', evt.error);
 

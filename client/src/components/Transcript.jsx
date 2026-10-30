@@ -31,7 +31,7 @@ export default function Transcript({ messages, mode, status, busy, level, error,
         {status === 'connecting' && <div className="empty muted">Connecting…</div>}
         {messages.map((m) =>
           m.role === 'event' ? (
-            <div key={m.id} className="event">{m.text}</div>
+            <div key={m.id} className={`event ${m.tone || ''}`}>{m.text}</div>
           ) : (
             <div key={m.id} className={`bubble ${m.role}`}>
               {m.pending && !m.text ? <span className="dots"><i /><i /><i /></span> : m.text}

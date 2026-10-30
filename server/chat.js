@@ -1,5 +1,5 @@
 import { AzureOpenAI } from 'openai';
-import { buildInstructions, chatTools, runTool, spokenName } from './agent.js';
+import { buildInstructions, chatTools, claimsLogged, runTool, spokenName } from './agent.js';
 
 let client;
 function getClient() {
@@ -24,18 +24,25 @@ export function chatGreeting(session) {
 export async function handleChatTurn(session, userText) {
   session.chat.push({ role: 'user', content: userText });
   const events = [];
+  let toolChoice = 'auto';
 
   for (let i = 0; i < 4; i++) {
     const res = await getClient().chat.completions.create({
       model: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
       messages: [{ role: 'system', content: buildInstructions(session, 'chat') }, ...session.chat],
       tools: chatTools,
+      tool_choice: toolChoice,
       temperature: 0.3,
       max_tokens: 300,
     });
     const msg = res.choices[0].message;
 
     if (!msg.tool_calls?.length) {
+      // Model said "logged" without logging: discard that reply and make it actually submit.
+      if (!session.ticket && claimsLogged(msg.content) && toolChoice === 'auto') {
+        toolChoice = { type: 'function', function: { name: 'submit_ticket' } };
+        continue;
+      }
       session.chat.push({ role: 'assistant', content: msg.content || '' });
       return { reply: msg.content || '', events };
     }
@@ -46,6 +53,7 @@ export async function handleChatTurn(session, userText) {
       events.push({ type: 'tool', name: call.function.name, args: call.function.arguments, output }, ...ev);
       session.chat.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(output) });
     }
+    toolChoice = 'auto';
   }
   return { reply: 'Sorry, something went wrong on my end. Someone from IT will call you back.', events };
 }

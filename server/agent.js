@@ -77,7 +77,10 @@ FLOW
 1. Open with exactly: ${greeting}
 2. If unidentified: when they give a name, call lookup_caller_by_name. If one match, confirm the workstation in a few words ("You're on RADWS-014?"). If several, ask which one. If none, ask for the System ID on the PC sticker.
 3. Once you know what's wrong, fill fields ONLY from what the caller actually said. If they didn't name or clearly describe the application, ask one short question ("Which application, PowerScribe, Sectra, Epic?"). Don't ask about priority, modality, or patient info.
-4. Call submit_ticket immediately, then say: ${closing}
+4. Call submit_ticket immediately, saying nothing in that same turn. ONLY after it returns logged:true, say: ${closing}
+NEVER say "logged" or "someone will follow up" unless submit_ticket has returned logged:true.
+
+HEARING: callers say product names fast. Treat sound-alikes as the product: "power scribe / powersquad / PS1" = PowerscribeOne; "sectra / spectra" = Sectra; "radiant / epic" = Epic Radiant; "viewpoint" = GE Viewpoint; "ambra / amber" = Ambra Outside Image. If the problem itself is unintelligible, ask them to repeat it once.
 
 FIELD RULES for submit_ticket
 - short_description: <= 80 chars, technician-friendly, e.g. "PowerScribe freezing during dictation on RADWS-014".
@@ -89,6 +92,13 @@ FIELD RULES for submit_ticket
   Mapping: dictation/voice recognition/reports -> PowerscribeOne; images/viewer/hanging protocols -> Sectra or GE Viewpoint (whichever they name, else Sectra); worklist/orders/exam status -> Epic Radiant; outside CD/images -> Ambra Outside Image; breast MRI CAD -> DynaCAD; breast density -> Volpara; stroke/perfusion -> Rapid; mouse/monitor/PC/login/printer -> Physician Workstation Issue; "call me back" -> Radiologist Requesting Call Back.
 - more_information: the caller's own words plus anything useful (error text, when it started).`;
 }
+
+/** True when the assistant is telling the caller the issue is logged. Used to catch claims made without submit_ticket. */
+export const claimsLogged = (text) => /\blogged\b|\bfollow(?:ing)? up\b|\bticket (?:is|has been) (?:created|opened)\b/i.test(text || '');
+
+/** Vocabulary hint for speech-to-text so product names don't come back as "PowerSquad". */
+export const TRANSCRIBE_PROMPT =
+  'Radiology IT helpdesk call. Terms: PowerScribe One, Sectra, Epic Radiant, Epic Mammography, GE Viewpoint, Ambra, DynaCAD, Volpara, Rapid, PACS, worklist, hanging protocol, dictation, accession, MRN, CT, MRI, ultrasound, mammo, DEXA, fluoro, nuclear medicine, workstation.';
 
 /** "Patel, Anika" -> "Anika" */
 export function spokenName(account) {
