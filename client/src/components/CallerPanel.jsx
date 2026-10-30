@@ -18,7 +18,10 @@ export default function CallerPanel({ phone, setPhone, disabled, caller, session
   // Live caller-ID preview as the number is typed.
   useEffect(() => {
     const digits = phone.replace(/\D/g, '');
-    if (digits.length < 4) return setPreview(null);
+    if (digits.length < 4) {
+      setPreview(null);
+      return;
+    }
     const t = setTimeout(() => {
       fetch(`/api/lookup?phone=${encodeURIComponent(phone)}`).then((r) => r.json()).then(setPreview).catch(() => {});
     }, 250);

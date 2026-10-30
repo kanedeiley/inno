@@ -5,7 +5,9 @@ export default function Transcript({ messages, mode, status, busy, level, error,
   const endRef = useRef(null);
   const inputRef = useRef(null);
 
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [messages, busy]);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, busy]);
   useEffect(() => {
     if (mode === 'chat' && status === 'live' && !busy) inputRef.current?.focus();
   }, [mode, status, busy]);
