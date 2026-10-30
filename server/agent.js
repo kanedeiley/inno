@@ -34,8 +34,9 @@ function draftFromCaller(caller) {
     short_description: '',
     priority: 'Moderate',
     system_id: caller?.workstation || '',
-    patient_info: caller?.study ? `${caller.study.patient} — Acc ${caller.study.accession}` : 'N/A',
-    modality: caller?.study?.modality || '',
+    // Only the workstation is known for sure; patient/modality come from what the caller says.
+    patient_info: '',
+    modality: '',
     application: '',
     more_information: '',
   };
@@ -50,7 +51,7 @@ export function buildInstructions(session, mode) {
         `- Name (Account): ${c.name} (${c.role || 'staff'})`,
         `- Workstation / System ID: ${c.workstation} at ${c.site || c.location || 'unknown site'}`,
         c.study
-          ? `- Open study on that workstation: ${c.study.procedure}, patient ${c.study.patient}, accession ${c.study.accession} (modality ${c.study.modality})`
+          ? `- Study open on that workstation (reference only, NOT necessarily related to the issue): ${c.study.procedure}, patient ${c.study.patient}, accession ${c.study.accession} (modality ${c.study.modality})`
           : '- No study currently open.',
       ].join('\n')
     : session.phone
@@ -75,17 +76,17 @@ ${known}
 FLOW
 1. Open with exactly: ${greeting}
 2. If unidentified: when they give a name, call lookup_caller_by_name. If one match, confirm the workstation in a few words ("You're on RADWS-014?"). If several, ask which one. If none, ask for the System ID on the PC sticker.
-3. Once you know what's wrong, infer every field yourself. Ask ONE quick follow-up only if the problem is too vague to act on (e.g. "it's broken" with no app or symptom). Never ask for priority, modality, or patient info unless the issue is clearly about a specific patient/study that isn't the open study.
+3. Once you know what's wrong, fill fields ONLY from what the caller actually said. If they didn't name or clearly describe the application, ask one short question ("Which application, PowerScribe, Sectra, Epic?"). Don't ask about priority, modality, or patient info.
 4. Call submit_ticket immediately, then say: ${closing}
 
 FIELD RULES for submit_ticket
 - short_description: <= 80 chars, technician-friendly, e.g. "PowerScribe freezing during dictation on RADWS-014".
 - priority: "Urgent" if they say STAT, urgent, ED/trauma, patient on table/waiting, can't read at all, or system down; otherwise "Moderate".
 - system_id: the workstation ID.
-- patient_info: if the issue involves the open study, use it; if they name another patient, use that; else "N/A".
-- modality: one of ${MODALITIES.join(' | ')}. Use the open study's modality if relevant, otherwise infer, otherwise "Other".
-- application: one of ${APPLICATIONS.join(' | ')}.
-  Hints: dictation/voice recognition/reports -> PowerscribeOne; images/viewer/hanging protocols -> Sectra or GE Viewpoint (whichever they name, else Sectra); worklist/orders/exam status -> Epic Radiant; outside CD/images -> Ambra Outside Image; breast MRI CAD -> DynaCAD; breast density -> Volpara; stroke/perfusion -> Rapid; mouse/monitor/PC/login/printer -> Physician Workstation Issue; "call me back" -> Radiologist Requesting Call Back.
+- patient_info: "N/A" unless the caller mentions a patient or study. If they say "this study"/"this patient"/"the one I have open", use the open study above; if they name a patient, use what they said.
+- modality: one of ${MODALITIES.join(' | ')}. Only if the caller mentions it or refers to the open study; otherwise "Other".
+- application: one of ${APPLICATIONS.join(' | ')}. Must come from the caller's words, never from the open study or role.
+  Mapping: dictation/voice recognition/reports -> PowerscribeOne; images/viewer/hanging protocols -> Sectra or GE Viewpoint (whichever they name, else Sectra); worklist/orders/exam status -> Epic Radiant; outside CD/images -> Ambra Outside Image; breast MRI CAD -> DynaCAD; breast density -> Volpara; stroke/perfusion -> Rapid; mouse/monitor/PC/login/printer -> Physician Workstation Issue; "call me back" -> Radiologist Requesting Call Back.
 - more_information: the caller's own words plus anything useful (error text, when it started).`;
 }
 
