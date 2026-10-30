@@ -71,14 +71,16 @@ export function recordAgent(session, text) {
 }
 
 // ---------- extraction (gpt-4o) ----------
+export const chatConfig = () => ({
+  endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+  apiKey: process.env.AZURE_OPENAI_API_KEY,
+  apiVersion: process.env.AZURE_OPENAI_CHAT_API_VERSION || '2024-10-21',
+  deployment: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
+});
+
 let client;
 export function llm() {
-  client ??= new AzureOpenAI({
-    endpoint: process.env.AZURE_OPENAI_ENDPOINT,
-    apiKey: process.env.AZURE_OPENAI_API_KEY,
-    apiVersion: process.env.AZURE_OPENAI_CHAT_API_VERSION || '2024-10-21',
-    deployment: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
-  });
+  client ??= new AzureOpenAI(chatConfig());
   return client;
 }
 
@@ -132,7 +134,7 @@ FIELDS
 async function extract(session) {
   const lines = session.transcript.map((t) => `${t.role === 'agent' ? 'Agent' : 'Caller'}: ${t.text}`).join('\n');
   const res = await llm().chat.completions.create({
-    model: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
+    model: chatConfig().deployment,
     messages: [
       { role: 'system', content: extractPrompt(session) },
       { role: 'user', content: lines },
@@ -158,7 +160,9 @@ export async function nextTurn(session, utterance, mode) {
   try {
     x = await extract(session);
   } catch (err) {
-    console.error('[extract]', err.message);
+    const { endpoint, deployment } = chatConfig();
+    console.error(`[extract] ${deployment} @ ${endpoint}: ${err.message}`);
+    events.push({ type: 'error', message: `gpt-4o call failed (${deployment}): ${err.message}` });
     return { say: 'Sorry, could you say that again?', events, done: false };
   }
 

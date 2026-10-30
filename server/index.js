@@ -3,7 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import express from 'express';
 import { directorySample, loadData, lookupByPhone } from './data.js';
-import { createSession, getSession, publicSession } from './agent.js';
+import { chatConfig, createSession, getSession, publicSession } from './agent.js';
 import { chatGreeting, handleChatTurn } from './chat.js';
 import { attachRealtime } from './realtime.js';
 import { listTickets } from './tickets.js';
@@ -53,6 +53,10 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(dist));
   app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
 }
+
+const { endpoint: chatEndpoint, deployment: chatDeployment, apiVersion } = chatConfig();
+console.log(`[server] chat/extraction: ${chatDeployment} @ ${chatEndpoint} (api-version ${apiVersion})`);
+console.log(`[server] realtime: ${process.env.AZURE_OPENAI_REALTIME_DEPLOYMENT || 'gpt-realtime'} @ ${process.env.AZURE_OPENAI_REALTIME_URL || process.env.AZURE_OPENAI_ENDPOINT}`);
 
 const server = http.createServer(app);
 attachRealtime(server);

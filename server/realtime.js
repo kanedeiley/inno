@@ -112,7 +112,7 @@ function bridge(client, session) {
           const { say, events, done } = await nextTurn(session, utterance, 'voice');
           console.log(`[turn] caller: "${utterance}" -> say: ${say ? `"${say}"` : '(silent)'}`);
           sendClient({ type: 'proxy.thinking', on: false });
-          for (const e of events) sendClient({ type: `proxy.${e.type}`, ...e });
+          for (const e of events) sendClient({ ...e, type: `proxy.${e.type}` });
           if (done) closeAfterSpeaking = true;
           if (say) speak(say);
         });

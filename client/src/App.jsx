@@ -76,6 +76,9 @@ export default function App() {
       case 'ticket.submitted':
         onTicket(e.ticket);
         break;
+      case 'error':
+        setError(e.message);
+        break;
     }
   };
 
