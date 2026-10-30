@@ -27,7 +27,6 @@ export default function App() {
   const [health, setHealth] = useState(null);
 
   const voiceRef = useRef(null);
-  const ticketRef = useRef(null);
 
   useEffect(() => {
     api('/api/health').then(setHealth).catch(() => setHealth({ ok: false }));
@@ -53,26 +52,37 @@ export default function App() {
 
   const onTicket = (t) => {
     addEvent(`Logged ${t.number} · ${t.application} · ${t.priority}`, 'ok');
-    ticketRef.current = t;
     setTicket(t);
     setDraft(t);
     setClock((c) => ({ ...c, end: Date.now() }));
   };
 
-  const onToolEvent = (name, output) => {
-    if (name === 'lookup_caller_by_name') {
-      addEvent(
-        output.found === true ? `Matched ${output.name} → ${output.workstation}`
-          : output.found === 'multiple' ? `${output.candidates.length} possible matches`
-          : 'No dashboard match for that name',
-      );
+  // Server events shared by chat responses and the voice socket (voice ones arrive prefixed with "proxy.").
+  const onServerEvent = (e) => {
+    switch (e.type) {
+      case 'lookup':
+        addEvent(
+          e.matches.length === 1 ? `Matched ${e.matches[0].name} → ${e.matches[0].workstation}`
+            : e.matches.length > 1 ? `${e.matches.length} matches for “${e.name}”`
+            : `No dashboard match for “${e.name}”`,
+        );
+        break;
+      case 'caller.identified':
+        setCaller(e.caller);
+        break;
+      case 'ticket.draft':
+        setDraft(e.draft);
+        break;
+      case 'ticket.submitted':
+        onTicket(e.ticket);
+        break;
     }
   };
 
   function reset() {
     voiceRef.current?.stop();
     voiceRef.current = null;
-    ticketRef.current = null;
+    setBusy(false);
     setSession(null);
     setCaller(null);
     setDraft(null);
@@ -127,31 +137,15 @@ export default function App() {
       case 'response.audio_transcript.delta':
         upsert(evt.item_id, 'assistant', (m) => ({ text: (m?.text || '') + evt.delta }));
         break;
-      case 'proxy.tool':
-        onToolEvent(evt.name, evt.output);
-        break;
-      case 'proxy.caller.identified':
-        setCaller(evt.caller);
-        setDraft(evt.draft);
-        break;
-      case 'proxy.ticket.submitted':
-        onTicket(evt.ticket);
+      case 'proxy.thinking':
+        setBusy(evt.on);
         break;
       case 'proxy.call.complete':
-        if (!call.hangingUp) {
-          call.hangingUp = true;
-          call.drained().then(() => setTimeout(() => call.stop(), 600));
-        }
+        // Closing line has been generated; hang up once it has finished playing.
+        call.drained().then(() => setTimeout(() => call.stop(), 600));
         break;
-      case 'response.done': {
-        // Hang up on our own once the closing line (the response after submit_ticket) has been spoken.
-        const hasToolCall = evt.response?.output?.some((o) => o.type === 'function_call');
-        if (ticketRef.current && !hasToolCall && !call.hangingUp) {
-          call.hangingUp = true;
-          call.drained().then(() => setTimeout(() => call.stop(), 600));
-        }
-        break;
-      }
+      default:
+        if (evt.type.startsWith('proxy.')) onServerEvent({ ...evt, type: evt.type.slice(6) });
     }
   }
 
@@ -161,12 +155,7 @@ export default function App() {
     setBusy(true);
     try {
       const res = await api('/api/chat', { sessionId: session.id, message: text });
-      for (const e of res.events) {
-        if (e.type === 'tool') onToolEvent(e.name, e.output);
-        if (e.type === 'caller.identified') setCaller(e.caller);
-        if (e.type === 'ticket.submitted') onTicket(e.ticket);
-      }
-      setDraft(res.session.draft);
+      res.events.forEach(onServerEvent);
       setMessages((l) => [...l, { id: crypto.randomUUID(), role: 'assistant', text: res.reply }]);
     } catch (e) {
       setError(e.message);

@@ -1,9 +1,13 @@
 import crypto from 'node:crypto';
+import { AzureOpenAI } from 'openai';
 import { lookupByName, lookupByPhone, isWorkstationActive, MODALITIES, APPLICATIONS } from './data.js';
 import { saveTicket } from './tickets.js';
 
+// The server owns the conversation. After every caller utterance (typed or transcribed) gpt-4o extracts
+// the ticket fields from the whole transcript, then nextTurn() picks the next line. The realtime model only
+// voices that line, so it can never claim "logged" before the ticket is actually saved.
+
 // ---------- sessions ----------
-// One session per simulated call. Holds everything we knew before the call plus the ticket draft.
 const sessions = new Map();
 
 export function createSession({ phone } = {}) {
@@ -14,9 +18,14 @@ export function createSession({ phone } = {}) {
     phone: phone || null,
     lookup,
     caller,
+    identifiedBy: caller ? 'phone' : null,
     draft: draftFromCaller(caller),
     ticket: null,
-    chat: [],
+    transcript: [], // { role: 'agent' | 'caller', text }
+    lastLookupName: null,
+    candidates: null,
+    askedApplication: false,
+    lastSay: null,
     startedAt: Date.now(),
   };
   sessions.set(session.id, session);
@@ -33,8 +42,8 @@ function draftFromCaller(caller) {
   return {
     short_description: '',
     priority: 'Moderate',
+    // Only the workstation is known for sure; everything else comes from what the caller says.
     system_id: caller?.workstation || '',
-    // Only the workstation is known for sure; patient/modality come from what the caller says.
     patient_info: '',
     modality: '',
     application: '',
@@ -42,157 +51,186 @@ function draftFromCaller(caller) {
   };
 }
 
-// ---------- prompt ----------
-export function buildInstructions(session, mode) {
-  const c = session.caller;
-  const known = c
-    ? [
-        `Caller IDENTIFIED from caller ID (${session.phone}). Do NOT ask their name or workstation.`,
-        `- Name (Account): ${c.name} (${c.role || 'staff'})`,
-        `- Workstation / System ID: ${c.workstation} at ${c.site || c.location || 'unknown site'}`,
-        c.study
-          ? `- Study open on that workstation (reference only, NOT necessarily related to the issue): ${c.study.procedure}, patient ${c.study.patient}, accession ${c.study.accession} (modality ${c.study.modality})`
-          : '- No study currently open.',
-      ].join('\n')
-    : session.phone
-      ? `Caller ID ${session.phone} did not match an active workstation (${session.lookup?.reason}). Caller is UNIDENTIFIED.`
-      : 'No caller ID. Caller is UNIDENTIFIED.';
-
-  const greeting = c
-    ? `"Hi ${spokenName(c.name)}, Radiology IT. What's going on?"`
-    : `"Radiology IT, who am I speaking with?"`;
-
-  const closing =
-    mode === 'voice'
-      ? `"Got it, it's logged and someone will follow up shortly."  (don't read the ticket number aloud; it's on screen)`
-      : `"Logged as <ticket_number>. Someone will follow up shortly."`;
-
-  return `You are the Radiology IT helpdesk ${mode === 'voice' ? 'phone line' : 'chat'}. Callers are busy radiologists and techs.
-GOAL: get a complete ticket logged in under 15 seconds. Be short and warm: one brief sentence per turn, no filler, no apologies, never recite the ticket back.
-
-KNOWN BEFORE THE CALL
-${known}
-
-FLOW
-1. Open with exactly: ${greeting}
-2. If unidentified: when they give a name, call lookup_caller_by_name. If one match, confirm the workstation in a few words ("You're on RADWS-014?"). If several, ask which one. If none, ask for the System ID on the PC sticker.
-3. Once you know what's wrong, fill fields ONLY from what the caller actually said. If they didn't name or clearly describe the application, ask one short question ("Which application, PowerScribe, Sectra, Epic?"). Don't ask about priority, modality, or patient info.
-4. Call submit_ticket immediately, saying nothing in that same turn. ONLY after it returns logged:true, say: ${closing}
-NEVER say "logged" or "someone will follow up" unless submit_ticket has returned logged:true.
-
-HEARING: callers say product names fast. Treat sound-alikes as the product: "power scribe / powersquad / PS1" = PowerscribeOne; "sectra / spectra" = Sectra; "radiant / epic" = Epic Radiant; "viewpoint" = GE Viewpoint; "ambra / amber" = Ambra Outside Image. If the problem itself is unintelligible, ask them to repeat it once.
-
-FIELD RULES for submit_ticket
-- short_description: <= 80 chars, technician-friendly, e.g. "PowerScribe freezing during dictation on RADWS-014".
-- priority: "Urgent" if they say STAT, urgent, ED/trauma, patient on table/waiting, can't read at all, or system down; otherwise "Moderate".
-- system_id: the workstation ID.
-- patient_info: "N/A" unless the caller mentions a patient or study. If they say "this study"/"this patient"/"the one I have open", use the open study above; if they name a patient, use what they said.
-- modality: one of ${MODALITIES.join(' | ')}. Only if the caller mentions it or refers to the open study; otherwise "Other".
-- application: one of ${APPLICATIONS.join(' | ')}. Must come from the caller's words, never from the open study or role.
-  Mapping: dictation/voice recognition/reports -> PowerscribeOne; images/viewer/hanging protocols -> Sectra or GE Viewpoint (whichever they name, else Sectra); worklist/orders/exam status -> Epic Radiant; outside CD/images -> Ambra Outside Image; breast MRI CAD -> DynaCAD; breast density -> Volpara; stroke/perfusion -> Rapid; mouse/monitor/PC/login/printer -> Physician Workstation Issue; "call me back" -> Radiologist Requesting Call Back.
-- more_information: the caller's own words plus anything useful (error text, when it started).`;
-}
-
-/** True when the assistant is telling the caller the issue is logged. Used to catch claims made without submit_ticket. */
-export const claimsLogged = (text) => /\blogged\b|\bfollow(?:ing)? up\b|\bticket (?:is|has been) (?:created|opened)\b/i.test(text || '');
-
-/** Vocabulary hint for speech-to-text so product names don't come back as "PowerSquad". */
-export const TRANSCRIBE_PROMPT =
-  'Radiology IT helpdesk call. Terms: PowerScribe One, Sectra, Epic Radiant, Epic Mammography, GE Viewpoint, Ambra, DynaCAD, Volpara, Rapid, PACS, worklist, hanging protocol, dictation, accession, MRN, CT, MRI, ultrasound, mammo, DEXA, fluoro, nuclear medicine, workstation.';
-
 /** "Patel, Anika" -> "Anika" */
 export function spokenName(account) {
   const [last, first] = String(account).split(',').map((s) => s.trim());
   return first ? first.split(/\s+/)[0] : last;
 }
 
-// ---------- tools ----------
-const TOOL_SPECS = [
-  {
-    name: 'lookup_caller_by_name',
-    description: "Find the caller's workstation by their name (matched against the dashboard Account field).",
-    parameters: {
-      type: 'object',
-      properties: { name: { type: 'string', description: 'Caller name as spoken/typed' } },
-      required: ['name'],
-    },
-  },
-  {
-    name: 'submit_ticket',
-    description: 'Log the radiology IT incident. Call as soon as you know what is wrong.',
-    parameters: {
-      type: 'object',
-      properties: {
-        short_description: { type: 'string', description: 'Max 80 characters' },
-        priority: { type: 'string', enum: ['Moderate', 'Urgent'] },
-        system_id: { type: 'string', description: 'Workstation / PC System ID' },
-        patient_info: { type: 'string', description: 'Name, DOB, MRN, Accession — or N/A' },
-        modality: { type: 'string', enum: MODALITIES },
-        application: { type: 'string', enum: APPLICATIONS },
-        more_information: { type: 'string' },
-      },
-      required: ['short_description', 'priority', 'system_id', 'patient_info', 'modality', 'application'],
-    },
-  },
-];
+/** Vocabulary hint for speech-to-text so product names don't come back as "PowerSquad". */
+export const TRANSCRIBE_PROMPT =
+  'Radiology IT helpdesk call. Terms: PowerScribe One, Sectra, Epic Radiant, Epic Mammography, GE Viewpoint, Ambra, DynaCAD, Volpara, Rapid, PACS, worklist, hanging protocol, dictation, accession, MRN, CT, MRI, ultrasound, mammo, DEXA, fluoro, nuclear medicine, workstation.';
 
-export const chatTools = TOOL_SPECS.map((t) => ({ type: 'function', function: t }));
-export const realtimeTools = TOOL_SPECS.map((t) => ({ type: 'function', ...t }));
+export const greeting = (session) =>
+  session.caller ? `Hi ${spokenName(session.caller.name)}, Radiology IT. What's going on?` : 'Radiology IT, who am I speaking with?';
 
-/**
- * Runs a tool for a session. Returns { output, events } where events are pushed to the UI
- * so the caller panel / ticket card update live.
- */
-export function runTool(session, name, rawArgs) {
-  let args = {};
-  try {
-    args = typeof rawArgs === 'string' ? JSON.parse(rawArgs || '{}') : rawArgs || {};
-  } catch {
-    return { output: { error: 'invalid JSON arguments' }, events: [] };
-  }
-
-  if (name === 'lookup_caller_by_name') {
-    const matches = lookupByName(args.name);
-    if (matches.length === 1) {
-      session.caller = matches[0];
-      session.draft = { ...draftFromCaller(matches[0]), ...pickFilled(session.draft, ['short_description', 'more_information']) };
-      return {
-        output: { found: true, name: matches[0].name, workstation: matches[0].workstation, site: matches[0].site, open_study: matches[0].study },
-        events: [{ type: 'caller.identified', caller: session.caller, draft: session.draft }],
-      };
-    }
-    if (matches.length > 1) {
-      return { output: { found: 'multiple', candidates: matches.map((m) => ({ name: m.name, workstation: m.workstation, site: m.site })) }, events: [] };
-    }
-    return { output: { found: false }, events: [] };
-  }
-
-  if (name === 'submit_ticket') {
-    if (session.ticket) return { output: { already_logged: true, ticket_number: session.ticket.number }, events: [] };
-    const fields = {
-      short_description: String(args.short_description || '').slice(0, 80),
-      priority: args.priority === 'Urgent' ? 'Urgent' : 'Moderate',
-      system_id: String(args.system_id || session.draft.system_id || '').toUpperCase(),
-      patient_info: args.patient_info?.trim() || 'N/A',
-      modality: MODALITIES.includes(args.modality) ? args.modality : 'Other',
-      application: APPLICATIONS.includes(args.application) ? args.application : 'Other',
-      more_information: String(args.more_information || ''),
-    };
-    const ticket = saveTicket({
-      ...fields,
-      caller_name: session.caller?.name || null,
-      caller_phone: session.phone,
-      system_id_on_dashboard: isWorkstationActive(fields.system_id),
-      call_duration_ms: Date.now() - session.startedAt,
-    });
-    session.draft = fields;
-    session.ticket = ticket;
-    return { output: { logged: true, ticket_number: ticket.number }, events: [{ type: 'ticket.submitted', ticket }] };
-  }
-
-  return { output: { error: `unknown tool ${name}` }, events: [] };
+export function recordAgent(session, text) {
+  if (!text) return;
+  session.lastSay = text;
+  session.transcript.push({ role: 'agent', text });
 }
 
-function pickFilled(obj, keys) {
-  return Object.fromEntries(keys.filter((k) => obj?.[k]).map((k) => [k, obj[k]]));
+// ---------- extraction (gpt-4o) ----------
+let client;
+export function llm() {
+  client ??= new AzureOpenAI({
+    endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+    apiKey: process.env.AZURE_OPENAI_API_KEY,
+    apiVersion: process.env.AZURE_OPENAI_CHAT_API_VERSION || '2024-10-21',
+    deployment: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
+  });
+  return client;
+}
+
+const str = { type: 'string' };
+const EXTRACT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    last_utterance: { type: 'string', enum: ['info', 'filler', 'unintelligible'] },
+    caller_name: str,
+    system_id: str,
+    problem: str,
+    short_description: str,
+    priority: { type: 'string', enum: ['Moderate', 'Urgent'] },
+    patient_info: str,
+    modality: { type: 'string', enum: MODALITIES },
+    application: { type: 'string', enum: [...APPLICATIONS, 'Unknown'] },
+    more_information: str,
+  },
+  required: [
+    'last_utterance', 'caller_name', 'system_id', 'problem', 'short_description',
+    'priority', 'patient_info', 'modality', 'application', 'more_information',
+  ],
+};
+
+function extractPrompt(session) {
+  const c = session.caller;
+  const context = c
+    ? `Caller: ${c.name} on workstation ${c.workstation}.` +
+      (c.study ? ` Study open on that workstation (only relevant if the caller refers to it): ${c.study.procedure}, ${c.study.patient}, accession ${c.study.accession}, modality ${c.study.modality}.` : '')
+    : 'Caller not yet identified.';
+
+  return `You extract radiology IT helpdesk ticket fields from a call transcript. Use ONLY what the caller said; never invent.
+Speech-to-text is imperfect: treat sound-alikes as the product ("power scribe", "powersquad", "PS1" = PowerscribeOne; "spectra" = Sectra; "radiant" = Epic Radiant; "viewpoint" = GE Viewpoint; "amber" = Ambra Outside Image).
+
+CONTEXT: ${context}
+
+FIELDS
+- last_utterance: classify ONLY the caller's final line. "filler" = thanks/ok/bye/greeting/noise with no new information. "unintelligible" = garbled words that don't make sense. Otherwise "info".
+- caller_name: the caller's name as they gave it across the call, else "".
+- system_id: a workstation / PC / system ID the caller stated (e.g. "RADWS-014"), else "".
+- problem: what is wrong, in the caller's words. "" if they haven't described a problem yet. Naming only an app ("PowerScribe") is not a problem; "PowerScribe won't let me log in" is.
+- short_description: <= 80 chars for a technician, e.g. "Cannot log in to PowerScribe One". "" if no problem yet.
+- priority: "Urgent" only if they say STAT, urgent, ED/trauma, patient on the table/waiting, can't read at all, or everything is down. Else "Moderate".
+- patient_info: "N/A" unless the caller mentions a patient or study. If they refer to "this study/patient/the one I have open", use the open study. If they name a patient, use what they said.
+- modality: from the caller's words or the open study when they refer to it; else "Other".
+- application: one of the enum values, ONLY from the caller's words. Mapping: dictation/voice recognition/reports -> PowerscribeOne; images/viewer/hanging protocols -> the viewer they name (Sectra or GE Viewpoint); worklist/orders/exam status -> Epic Radiant; outside CD/images -> Ambra Outside Image; breast MRI CAD -> DynaCAD; breast density -> Volpara; stroke/perfusion -> Rapid; mouse/keyboard/monitor/PC/Windows login/printer -> Physician Workstation Issue; asks for a call back -> Radiologist Requesting Call Back; described but fits nothing -> Other. "Unknown" if they haven't said enough to tell.
+- more_information: any useful extra detail from the caller (error text, when it started, what they tried), else "".`;
+}
+
+async function extract(session) {
+  const lines = session.transcript.map((t) => `${t.role === 'agent' ? 'Agent' : 'Caller'}: ${t.text}`).join('\n');
+  const res = await llm().chat.completions.create({
+    model: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
+    messages: [
+      { role: 'system', content: extractPrompt(session) },
+      { role: 'user', content: lines },
+    ],
+    response_format: { type: 'json_schema', json_schema: { name: 'ticket_fields', strict: true, schema: EXTRACT_SCHEMA } },
+    temperature: 0,
+    max_tokens: 400,
+  });
+  return JSON.parse(res.choices[0].message.content);
+}
+
+// ---------- turn handling ----------
+/**
+ * Processes one caller utterance and returns what the agent should say next.
+ * { say: string|null, events: [...], done: boolean } — say=null means stay silent (caller said nothing new).
+ */
+export async function nextTurn(session, utterance, mode) {
+  const events = [];
+  if (session.ticket) return { say: null, events, done: true };
+  session.transcript.push({ role: 'caller', text: utterance });
+
+  let x;
+  try {
+    x = await extract(session);
+  } catch (err) {
+    console.error('[extract]', err.message);
+    return { say: 'Sorry, could you say that again?', events, done: false };
+  }
+
+  if (x.last_utterance === 'unintelligible') return { say: 'Sorry, could you say that again?', events, done: false };
+  if (x.last_utterance === 'filler' && session.transcript.length > 2) return { say: null, events, done: false };
+
+  // Identify the caller by name if caller ID didn't.
+  let justIdentified = false;
+  if (!session.caller && x.caller_name && x.caller_name !== session.lastLookupName) {
+    session.lastLookupName = x.caller_name;
+    const matches = lookupByName(x.caller_name);
+    session.candidates = matches;
+    events.push({ type: 'lookup', name: x.caller_name, matches: matches.map((m) => ({ name: m.name, workstation: m.workstation })) });
+    if (matches.length === 1) {
+      session.caller = matches[0];
+      session.identifiedBy = 'name';
+      session.draft.system_id = matches[0].workstation;
+      justIdentified = true;
+      events.push({ type: 'caller.identified', caller: session.caller });
+    }
+  }
+  // A system ID the caller states (or a correction) wins over the lookup.
+  if (x.system_id) session.draft.system_id = x.system_id.toUpperCase().replace(/\s+/g, '');
+
+  const d = session.draft;
+  Object.assign(d, {
+    short_description: x.short_description.slice(0, 80),
+    priority: x.priority,
+    patient_info: x.patient_info || 'N/A',
+    modality: x.modality,
+    application: x.application === 'Unknown' ? '' : x.application,
+    more_information: x.more_information || x.problem,
+  });
+  events.push({ type: 'ticket.draft', draft: { ...d } });
+
+  const first = session.caller ? spokenName(session.caller.name) : '';
+
+  if (!d.system_id) {
+    if (session.candidates?.length > 1) {
+      const names = session.candidates.slice(0, 3).map((m) => m.name.split(',').reverse().join(' ').trim());
+      return { say: `Is that ${names.join(' or ')}?`, events, done: false };
+    }
+    return {
+      say: x.caller_name ? "I couldn't find you on the dashboard. What's the system ID on your PC sticker?" : 'Who am I speaking with?',
+      events,
+      done: false,
+    };
+  }
+
+  if (!x.problem) {
+    return { say: justIdentified ? `Thanks ${first}, you're on ${d.system_id}. What's going on?` : "What's going on?", events, done: false };
+  }
+
+  if (!d.application && !session.askedApplication) {
+    session.askedApplication = true;
+    return { say: 'Which application is that, PowerScribe, Sectra, or Epic?', events, done: false };
+  }
+
+  // Everything required is known: save, then close.
+  const ticket = saveTicket({
+    ...d,
+    application: d.application || 'Other',
+    caller_name: session.caller?.name || x.caller_name || null,
+    caller_phone: session.phone,
+    identified_by: session.identifiedBy,
+    system_id_on_dashboard: isWorkstationActive(d.system_id),
+    call_duration_ms: Date.now() - session.startedAt,
+  });
+  session.ticket = ticket;
+  session.draft = { ...d, application: ticket.application };
+  events.push({ type: 'ticket.submitted', ticket });
+
+  const lead = justIdentified ? `Thanks ${first}, logged for ${d.system_id}.` : mode === 'voice' ? "Got it, it's logged." : `Logged as ${ticket.number}.`;
+  return { say: `${lead} Someone will follow up shortly.`, events, done: true };
 }

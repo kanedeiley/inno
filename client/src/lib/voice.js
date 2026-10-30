@@ -68,8 +68,10 @@ export class VoiceCall {
     this.src = this.ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.ctx, 'mic-capture');
     this.node.port.onmessage = ({ data }) => {
-      this.h.onLevel?.(data.level);
-      if (this.ws?.readyState === WebSocket.OPEN && this.live) {
+      // Half-duplex: don't send mic audio while the assistant is talking, so it can't hear (and answer) itself.
+      const speaking = this.playhead > this.ctx.currentTime - 0.3;
+      this.h.onLevel?.(speaking ? 0 : data.level);
+      if (this.ws?.readyState === WebSocket.OPEN && this.live && !speaking) {
         this.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: toBase64(data.pcm) }));
       }
     };
@@ -85,9 +87,6 @@ export class VoiceCall {
       case 'response.output_audio.delta':
       case 'response.audio.delta':
         this.#play(evt.delta);
-        break;
-      case 'input_audio_buffer.speech_started':
-        this.interrupt(); // barge-in: caller talks over the assistant
         break;
       case 'proxy.error':
       case 'error':

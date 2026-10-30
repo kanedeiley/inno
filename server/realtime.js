@@ -1,7 +1,12 @@
 import { WebSocket, WebSocketServer } from 'ws';
-import { buildInstructions, claimsLogged, getSession, realtimeTools, runTool, TRANSCRIBE_PROMPT } from './agent.js';
+import { getSession, greeting, nextTurn, recordAgent, TRANSCRIBE_PROMPT } from './agent.js';
 
 const API = (process.env.AZURE_OPENAI_REALTIME_API || 'ga').toLowerCase();
+
+// The realtime model is only the voice: the server decides every line (see agent.js nextTurn).
+const VOICE_INSTRUCTIONS =
+  'You are the voice of a radiology IT helpdesk. Speak in a calm, friendly, brisk tone. ' +
+  'Only ever say the exact line you are given for each response, in English, with nothing added.';
 
 function upstreamUrl() {
   if (process.env.AZURE_OPENAI_REALTIME_URL) return process.env.AZURE_OPENAI_REALTIME_URL;
@@ -12,27 +17,23 @@ function upstreamUrl() {
     : `wss://${host}/openai/v1/realtime?model=${dep}`;
 }
 
-function sessionUpdate(session) {
-  const instructions = buildInstructions(session, 'voice');
+function sessionUpdate() {
   const voice = process.env.REALTIME_VOICE || 'alloy';
   const transcription = { model: process.env.REALTIME_TRANSCRIBE_MODEL || 'whisper-1', language: 'en', prompt: TRANSCRIBE_PROMPT };
-  // Short silence window keeps turns snappy; callers on a helpdesk line talk in short bursts.
-  const turn_detection = { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 250, silence_duration_ms: 450 };
+  // create_response:false — VAD only detects turns; the server creates every response after deciding what to say.
+  const turn_detection = { type: 'server_vad', threshold: 0.5, prefix_padding_ms: 250, silence_duration_ms: 500, create_response: false };
 
   if (API === 'preview') {
     return {
       type: 'session.update',
       session: {
         modalities: ['audio', 'text'],
-        instructions,
+        instructions: VOICE_INSTRUCTIONS,
         voice,
         input_audio_format: 'pcm16',
         output_audio_format: 'pcm16',
         input_audio_transcription: transcription,
         turn_detection,
-        tools: realtimeTools,
-        tool_choice: 'auto',
-        temperature: 0.7,
       },
     };
   }
@@ -40,20 +41,17 @@ function sessionUpdate(session) {
     type: 'session.update',
     session: {
       type: 'realtime',
-      instructions,
+      instructions: VOICE_INSTRUCTIONS,
       output_modalities: ['audio'],
       audio: {
         input: { format: { type: 'audio/pcm', rate: 24000 }, transcription, turn_detection },
         output: { format: { type: 'audio/pcm', rate: 24000 }, voice },
       },
-      tools: realtimeTools,
-      tool_choice: 'auto',
     },
   };
 }
 
-// Only these client events are forwarded; everything else (session config, tools) is server-owned.
-const CLIENT_ALLOWED = new Set(['input_audio_buffer.append', 'input_audio_buffer.clear', 'response.cancel', 'conversation.item.truncate']);
+const CLIENT_ALLOWED = new Set(['input_audio_buffer.append', 'input_audio_buffer.clear']);
 
 export function attachRealtime(server) {
   const wss = new WebSocketServer({ noServer: true });
@@ -73,12 +71,27 @@ function bridge(client, session) {
   const sendUp = (obj) => (upstream.readyState === WebSocket.OPEN ? upstream.send(JSON.stringify(obj)) : pending.push(obj));
   const sendClient = (obj) => client.readyState === WebSocket.OPEN && client.send(JSON.stringify(obj));
 
+  // Only one response may be active at a time; queue the next line until the current one is done.
+  let responding = false;
+  let queuedLine = null;
+  let closeAfterSpeaking = false;
+  let turns = Promise.resolve(); // caller utterances are processed strictly in order
+
+  const speak = (line) => {
+    if (responding) {
+      queuedLine = line;
+      return;
+    }
+    responding = true;
+    recordAgent(session, line);
+    sendUp({ type: 'response.create', response: { instructions: `Say exactly this and nothing else: "${line}"` } });
+  };
+
   upstream.on('open', () => {
-    upstream.send(JSON.stringify(sessionUpdate(session)));
-    // Model speaks first with the greeting from its instructions.
-    upstream.send(JSON.stringify({ type: 'response.create' }));
+    upstream.send(JSON.stringify(sessionUpdate()));
     for (const m of pending.splice(0)) upstream.send(JSON.stringify(m));
     sendClient({ type: 'proxy.connected' });
+    speak(greeting(session));
   });
 
   upstream.on('message', (data) => {
@@ -90,36 +103,34 @@ function bridge(client, session) {
       return;
     }
 
-    if (evt.type === 'response.function_call_arguments.done') {
-      const { output, events } = runTool(session, evt.name, evt.arguments);
-      sendClient({ type: 'proxy.tool', name: evt.name, args: evt.arguments, output });
-      for (const e of events) sendClient({ type: `proxy.${e.type}`, ...e });
-      sendUp({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: evt.call_id, output: JSON.stringify(output) } });
-      if (session.forcedSubmit && session.ticket) {
-        // The caller already heard the closing line; just wrap up.
-        sendClient({ type: 'proxy.call.complete' });
-      } else {
-        sendUp({ type: 'response.create' });
-      }
-    }
-
-    // Guard: the model told the caller it's logged but never called submit_ticket -> force the call silently.
-    if (evt.type === 'response.done' && !session.ticket && !session.forcedSubmit) {
-      const output = evt.response?.output || [];
-      const said = output.flatMap((o) => o.content || []).map((c) => c.transcript || c.text || '').join(' ');
-      if (claimsLogged(said) && !output.some((o) => o.type === 'function_call')) {
-        session.forcedSubmit = true;
-        sendClient({ type: 'proxy.forced_submit' });
-        sendUp({
-          type: 'response.create',
-          response: {
-            tool_choice: { type: 'function', name: 'submit_ticket' },
-            instructions: 'Call submit_ticket now using what the caller said. Do not speak.',
-          },
+    switch (evt.type) {
+      case 'conversation.item.input_audio_transcription.completed': {
+        const utterance = evt.transcript?.trim();
+        if (!utterance || session.ticket) break;
+        turns = turns.then(async () => {
+          sendClient({ type: 'proxy.thinking', on: true });
+          const { say, events, done } = await nextTurn(session, utterance, 'voice');
+          sendClient({ type: 'proxy.thinking', on: false });
+          for (const e of events) sendClient({ type: `proxy.${e.type}`, ...e });
+          if (done) closeAfterSpeaking = true;
+          if (say) speak(say);
         });
+        break;
       }
+      case 'response.done':
+        responding = false;
+        if (queuedLine) {
+          const line = queuedLine;
+          queuedLine = null;
+          speak(line);
+        } else if (closeAfterSpeaking) {
+          sendClient({ type: 'proxy.call.complete' });
+        }
+        break;
+      case 'error':
+        console.error('[realtime] upstream error', evt.error);
+        break;
     }
-    if (evt.type === 'error') console.error('[realtime] upstream error', evt.error);
 
     if (client.readyState === WebSocket.OPEN) client.send(text);
   });

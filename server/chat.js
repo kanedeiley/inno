@@ -1,59 +1,16 @@
-import { AzureOpenAI } from 'openai';
-import { buildInstructions, chatTools, claimsLogged, runTool, spokenName } from './agent.js';
-
-let client;
-function getClient() {
-  client ??= new AzureOpenAI({
-    endpoint: process.env.AZURE_OPENAI_ENDPOINT,
-    apiKey: process.env.AZURE_OPENAI_API_KEY,
-    apiVersion: process.env.AZURE_OPENAI_CHAT_API_VERSION || '2024-10-21',
-    deployment: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
-  });
-  return client;
-}
+import { greeting, nextTurn, recordAgent } from './agent.js';
 
 /** Greeting is deterministic so the chat opens instantly with no model round-trip. */
 export function chatGreeting(session) {
-  const text = session.caller
-    ? `Hi ${spokenName(session.caller.name)}, Radiology IT. What's going on?`
-    : 'Radiology IT, who am I speaking with?';
-  session.chat.push({ role: 'assistant', content: text });
+  const text = greeting(session);
+  recordAgent(session, text);
   return text;
 }
 
 export async function handleChatTurn(session, userText) {
-  session.chat.push({ role: 'user', content: userText });
-  const events = [];
-  let toolChoice = 'auto';
-
-  for (let i = 0; i < 4; i++) {
-    const res = await getClient().chat.completions.create({
-      model: process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || 'gpt-4o',
-      messages: [{ role: 'system', content: buildInstructions(session, 'chat') }, ...session.chat],
-      tools: chatTools,
-      tool_choice: toolChoice,
-      temperature: 0.3,
-      max_tokens: 300,
-    });
-    const msg = res.choices[0].message;
-
-    if (!msg.tool_calls?.length) {
-      // Model said "logged" without logging: discard that reply and make it actually submit.
-      if (!session.ticket && claimsLogged(msg.content) && toolChoice === 'auto') {
-        toolChoice = { type: 'function', function: { name: 'submit_ticket' } };
-        continue;
-      }
-      session.chat.push({ role: 'assistant', content: msg.content || '' });
-      return { reply: msg.content || '', events };
-    }
-
-    session.chat.push({ role: 'assistant', content: msg.content || null, tool_calls: msg.tool_calls });
-    for (const call of msg.tool_calls) {
-      const { output, events: ev } = runTool(session, call.function.name, call.function.arguments);
-      events.push({ type: 'tool', name: call.function.name, args: call.function.arguments, output }, ...ev);
-      session.chat.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(output) });
-    }
-    toolChoice = 'auto';
-  }
-  return { reply: 'Sorry, something went wrong on my end. Someone from IT will call you back.', events };
+  const { say, events } = await nextTurn(session, userText, 'chat');
+  // Silent turns (caller said "thanks") still need something in chat: repeat the open question.
+  const reply = say ?? (session.ticket ? 'Anything else, just reach out.' : session.lastSay);
+  recordAgent(session, reply);
+  return { reply, events };
 }
